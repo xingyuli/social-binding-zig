@@ -40,6 +40,10 @@
             .url = "git+https://github.com/karlseguin/http.zig?ref=master#91600601f81544c6eeff48e83b76e1e6c5fea00b",
             .hash = "httpz-0.0.0-PNVzrLa0BgBOHnKWUMiDXXU8iXKdc8qENAWc60QubUq6",
         },
+        .xml = .{
+            .url = "git+https://github.com/ianprime0509/zig-xml.git#c2b02045810108e7a807855dc592157f44d32fb1",
+            .hash = "xml-0.1.0-ZTbP35VkAgAp2cDlvsPuL7SWVZWwPg-V99LmVRSHbCtL",
+        },
     },
     .paths = .{
         "build.zig",

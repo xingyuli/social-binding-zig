@@ -4,10 +4,13 @@ const httpz = @import("httpz");
 const Action = httpz.Action;
 const Group = httpz.routing.Group;
 
+const utils = @import("../utils/utils.zig");
+const XmlNode = utils.xml.XmlNode;
 const App = @import("../app.zig");
 
 pub fn mount(group: *Group(*App, Action(*App))) void {
     group.get("", verifySignature, .{});
+    group.post("", handleMessage, .{});
 }
 
 // *******************
@@ -22,7 +25,7 @@ fn verifySignature(app: *App, req: *httpz.Request, resp: *httpz.Response) !void 
     const nonce = query.get("nonce");
     const echostr = query.get("echostr");
 
-    if (isEmptyStr(signature) or isEmptyStr(timestamp) or isEmptyStr(nonce)) {
+    if (utils.text.isEmptyStr(signature) or utils.text.isEmptyStr(timestamp) or utils.text.isEmptyStr(nonce)) {
         resp.status = 400;
         return;
     }
@@ -31,7 +34,7 @@ fn verifySignature(app: *App, req: *httpz.Request, resp: *httpz.Response) !void 
 
     var params = [_][]const u8{ app.config.wx.token, timestamp.?, nonce.? };
 
-    std.mem.sort([]const u8, &params, {}, StringOrder.asc);
+    std.mem.sort([]const u8, &params, {}, utils.text.StringOrder.asc);
     for (params) |it| {
         std.debug.print("{s}\n", .{it});
     }
@@ -56,24 +59,81 @@ fn verifySignature(app: *App, req: *httpz.Request, resp: *httpz.Response) !void 
     }
 }
 
-// *****************
-// ***** other *****
-// *****************
+fn handleMessage(app: *App, req: *httpz.Request, resp: *httpz.Response) !void {
+    _ = app;
 
-fn isEmptyStr(str: ?[]const u8) bool {
-    if (str == null) {
-        return true;
-    }
-    for (str.?) |c| {
-        if (!std.ascii.isWhitespace(c)) {
-            return false;
+    const req_body = req.body().?;
+    std.debug.print("received req_body: {s}\n", .{req_body});
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+
+    const nodes = try utils.xml.readTextAsNodes(arena.allocator(), req_body);
+    defer {
+        for (nodes.items) |it| {
+            it.deinit();
         }
+        nodes.deinit();
     }
-    return true;
+
+    const msg_type_node = try utils.collection.findFirst(*XmlNode, nodes, xmlNodeNamePredicate("MsgType"));
+    const msg_type = utils.enums.fromStringOrNull(MsgType, msg_type_node.element_value.?);
+
+    var resp_body: []const u8 = undefined;
+
+    if (msg_type) |it| {
+        switch (it) {
+            .event => {
+                // TODO handle event: subscribe, unsubscribe
+            },
+            .text, .image, .voice, .video, .shortvideo, .location, .link => {
+                const from_user_name = try utils.collection.findFirst(*XmlNode, nodes, xmlNodeNamePredicate("FromUserName"));
+                const to_user_name = try utils.collection.findFirst(*XmlNode, nodes, xmlNodeNamePredicate("ToUserName"));
+                resp_body = try handleNormalMessage(resp.arena, from_user_name.element_value.?, to_user_name.element_value.?);
+            },
+        }
+    } else {
+        resp_body = "success";
+    }
+
+    resp.body = resp_body;
 }
 
-const StringOrder = struct {
-    pub fn asc(_: void, lhs: []const u8, rhs: []const u8) bool {
-        return std.mem.lessThan(u8, lhs, rhs);
-    }
+fn xmlNodeNamePredicate(comptime element_name: []const u8) fn (*XmlNode) bool {
+    return struct {
+        fn predicate(node: *XmlNode) bool {
+            return std.mem.eql(u8, node.element_name, element_name);
+        }
+    }.predicate;
+}
+
+fn handleNormalMessage(allocator: std.mem.Allocator, from_user_name: []const u8, to_user_name: []const u8) ![]const u8 {
+    const text_output_template =
+        \\<xml>
+        \\  <ToUserName><![CDATA[{s}]]></ToUserName>
+        \\  <FromUserName><![CDATA[{s}]]></FromUserName>
+        \\  <CreateTime>{d}</CreateTime>
+        \\  <MsgType><![CDATA[text]]></MsgType>
+        \\  <Content><![CDATA[{s}]]></Content>
+        \\</xml>
+    ;
+
+    const create_time: i64 = @divFloor(std.time.milliTimestamp(), 1000);
+    const content = "handle normal message";
+    return try std.fmt.allocPrint(allocator, text_output_template, .{ from_user_name, to_user_name, create_time, content });
+}
+
+// *********************
+// ***** protocols *****
+// *********************
+
+const MsgType = enum {
+    event,
+    text,
+    image,
+    voice,
+    video,
+    shortvideo,
+    location,
+    link,
 };
