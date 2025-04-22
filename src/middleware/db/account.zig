@@ -33,7 +33,10 @@ pub fn onWxUnsubscribe(ctx: QueryContext, open_id: []const u8) void {
 }
 
 fn findOneByExtIdentifier(ctx: QueryContext, account_type: AccountType, ext_identifier: []const u8) ?Sqlite.ResultRow {
-    const sql = std.fmt.allocPrint(ctx.arena, "SELECT * FROM account WHERE type = '{s}' AND ext_identifier = '{s}'", .{ @tagName(account_type), ext_identifier }) catch unreachable;
+    const sql = std.fmt.allocPrint(ctx.arena, "SELECT * FROM account WHERE type = '{s}' AND ext_identifier = '{s}'", .{
+        @tagName(account_type),
+        ext_identifier,
+    }) catch unreachable;
 
     const result_set = ctx.sqlite.exec(ctx.arena, sql) catch unreachable;
 
@@ -41,7 +44,11 @@ fn findOneByExtIdentifier(ctx: QueryContext, account_type: AccountType, ext_iden
 }
 
 fn updateStatus(ctx: QueryContext, status: AccountStatus, id: u64) void {
-    const sql = std.fmt.allocPrint(ctx.arena, "UPDATE account SET status = '{s}', updated_at = {d} WHERE id = {d}", .{ @tagName(status), std.time.timestamp(), id }) catch unreachable;
+    const sql = std.fmt.allocPrint(ctx.arena, "UPDATE account SET status = '{s}', updated_at = {d} WHERE id = {d}", .{
+        @tagName(status),
+        std.time.timestamp(),
+        id,
+    }) catch unreachable;
 
     _ = ctx.sqlite.exec(ctx.arena, sql) catch unreachable;
 }
@@ -56,4 +63,29 @@ fn addAccount(ctx: QueryContext, ext_identifier: []const u8) void {
     }) catch unreachable;
 
     _ = ctx.sqlite.exec(ctx.arena, sql) catch unreachable;
+}
+
+pub fn countGrouped(ctx: QueryContext) std.StringHashMap(u64) {
+    const sql = std.fmt.allocPrint(ctx.arena, "SELECT type, COUNT(*) as count FROM account WHERE status = '{s}' GROUP BY type", .{
+        @tagName(AccountStatus.SUBSCRIBED),
+    }) catch unreachable;
+
+    const result_set = ctx.sqlite.exec(ctx.arena, sql) catch unreachable;
+
+    var result = std.StringHashMap(u64).init(ctx.arena);
+    for (result_set.items) |it| {
+        const account_type = it.get("type").?.?;
+        const count = std.fmt.parseInt(u64, it.get("count").?.?, 10) catch unreachable;
+        result.put(account_type, count) catch unreachable;
+    }
+
+    inline for (@typeInfo(AccountType).@"enum".fields) |it| {
+        const v = result.get(it.name);
+
+        if (v == null) {
+            result.put(it.name, 0) catch unreachable;
+        }
+    }
+
+    return result;
 }

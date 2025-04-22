@@ -81,11 +81,19 @@ fn handleMessage(app: *App, req: *httpz.Request, resp: *httpz.Response) !void {
         switch (it) {
             .event => {
                 const event = try utils.collection.findFirst(*XmlNode, nodes, xmlNodeNamePredicate("Event"));
-                resp_body = handleEvent(.{ .sqlite = app.sqlite, .arena = resp.arena }, event.element_value.?, from_user_name.element_value.?);
+                resp_body = handleEvent(
+                    .{ .sqlite = app.sqlite, .arena = resp.arena },
+                    event.element_value.?,
+                    from_user_name.element_value.?,
+                );
             },
             .text, .image, .voice, .video, .shortvideo, .location, .link => {
                 const to_user_name = try utils.collection.findFirst(*XmlNode, nodes, xmlNodeNamePredicate("ToUserName"));
-                resp_body = try handleNormalMessage(resp.arena, from_user_name.element_value.?, to_user_name.element_value.?);
+                resp_body = try handleNormalMessage(
+                    resp.arena,
+                    from_user_name.element_value.?,
+                    to_user_name.element_value.?,
+                );
             },
         }
     } else {
@@ -126,7 +134,12 @@ fn handleNormalMessage(allocator: std.mem.Allocator, from_user_name: []const u8,
 
     const create_time: i64 = @divFloor(std.time.milliTimestamp(), 1000);
     const content = "handle normal message";
-    return try std.fmt.allocPrint(allocator, text_output_template, .{ from_user_name, to_user_name, create_time, content });
+    return try std.fmt.allocPrint(allocator, text_output_template, .{
+        from_user_name,
+        to_user_name,
+        create_time,
+        content,
+    });
 }
 
 // *********************
