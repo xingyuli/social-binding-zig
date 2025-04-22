@@ -8,6 +8,8 @@ const utils = @import("../utils/utils.zig");
 const XmlNode = utils.xml.XmlNode;
 const App = @import("../app.zig");
 
+const db = @import("../middleware/db/db.zig");
+
 pub fn mount(group: *Group(*App, Action(*App))) void {
     group.get("", verifySignature, .{});
     group.post("", handleMessage, .{});
@@ -39,10 +41,7 @@ fn verifySignature(app: *App, req: *httpz.Request, resp: *httpz.Response) !void 
         std.debug.print("{s}\n", .{it});
     }
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-
-    const combined = try std.mem.concat(arena.allocator(), u8, &params);
+    const combined = try std.mem.concat(resp.arena, u8, &params);
     std.debug.print("combined: {s}\n", .{combined});
 
     var digest: [std.crypto.hash.Sha1.digest_length]u8 = undefined;
@@ -60,21 +59,18 @@ fn verifySignature(app: *App, req: *httpz.Request, resp: *httpz.Response) !void 
 }
 
 fn handleMessage(app: *App, req: *httpz.Request, resp: *httpz.Response) !void {
-    _ = app;
-
     const req_body = req.body().?;
     std.debug.print("received req_body: {s}\n", .{req_body});
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-
-    const nodes = try utils.xml.readTextAsNodes(arena.allocator(), req_body);
+    const nodes = try utils.xml.readTextAsNodes(resp.arena, req_body);
     defer {
         for (nodes.items) |it| {
             it.deinit();
         }
         nodes.deinit();
     }
+
+    const from_user_name = try utils.collection.findFirst(*XmlNode, nodes, xmlNodeNamePredicate("FromUserName"));
 
     const msg_type_node = try utils.collection.findFirst(*XmlNode, nodes, xmlNodeNamePredicate("MsgType"));
     const msg_type = utils.enums.fromStringOrNull(MsgType, msg_type_node.element_value.?);
@@ -84,10 +80,10 @@ fn handleMessage(app: *App, req: *httpz.Request, resp: *httpz.Response) !void {
     if (msg_type) |it| {
         switch (it) {
             .event => {
-                // TODO handle event: subscribe, unsubscribe
+                const event = try utils.collection.findFirst(*XmlNode, nodes, xmlNodeNamePredicate("Event"));
+                resp_body = handleEvent(.{ .sqlite = app.sqlite, .arena = resp.arena }, event.element_value.?, from_user_name.element_value.?);
             },
             .text, .image, .voice, .video, .shortvideo, .location, .link => {
-                const from_user_name = try utils.collection.findFirst(*XmlNode, nodes, xmlNodeNamePredicate("FromUserName"));
                 const to_user_name = try utils.collection.findFirst(*XmlNode, nodes, xmlNodeNamePredicate("ToUserName"));
                 resp_body = try handleNormalMessage(resp.arena, from_user_name.element_value.?, to_user_name.element_value.?);
             },
@@ -105,6 +101,16 @@ fn xmlNodeNamePredicate(comptime element_name: []const u8) fn (*XmlNode) bool {
             return std.mem.eql(u8, node.element_name, element_name);
         }
     }.predicate;
+}
+
+fn handleEvent(ctx: db.QueryContext, event: []const u8, from_user_name: []const u8) []const u8 {
+    if (std.mem.eql(u8, event, "subscribe")) {
+        db.account.onWxSubscribe(ctx, from_user_name);
+    } else if (std.mem.eql(u8, event, "unsubscribe")) {
+        db.account.onWxUnsubscribe(ctx, from_user_name);
+    }
+
+    return "success";
 }
 
 fn handleNormalMessage(allocator: std.mem.Allocator, from_user_name: []const u8, to_user_name: []const u8) ![]const u8 {
