@@ -27,6 +27,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("xml", xml.module("xml"));
 
     exe.linkSystemLibrary("sqlite3");
+    exe.linkLibC();
 
     b.installArtifact(exe);
 
