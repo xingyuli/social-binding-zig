@@ -1,5 +1,6 @@
 {
     "db_file": "<path-to-sqlite-db-file>",
+    "llm_api_key": "<api_key>",
     "wx": {
         "token": "<token>"
     }

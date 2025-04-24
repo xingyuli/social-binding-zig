@@ -4,6 +4,8 @@ const Allocator = std.mem.Allocator;
 
 const utils_text = @import("text.zig");
 
+const log = std.log.scoped(.utils__xml);
+
 pub const XmlNode = struct {
     parent: ?*XmlNode,
 
@@ -83,7 +85,7 @@ fn readAsNodes(allocator: Allocator, reader: anytype) !std.ArrayList(*XmlNode) {
                 // std.debug.print("  cdata of {s}: {s}\n", .{ current_node.?.elemement_name, cdata });
                 current_node.?.element_value = try allocator.dupe(u8, cdata);
             },
-            else => std.log.debug(":( node type: {}", .{node}),
+            else => log.debug(":( node type: {}", .{node}),
         }
     }
 

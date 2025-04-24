@@ -9,6 +9,9 @@ const XmlNode = utils.xml.XmlNode;
 const App = @import("../app.zig");
 
 const db = @import("../middleware/db/db.zig");
+const llm = @import("../middleware/llm.zig");
+
+const log = std.log.scoped(.routes__wechat);
 
 pub fn mount(group: *Group(*App, Action(*App))) void {
     group.get("", verifySignature, .{});
@@ -32,24 +35,24 @@ fn verifySignature(app: *App, req: *httpz.Request, resp: *httpz.Response) !void 
         return;
     }
 
-    std.log.debug("s: {s}, t: {s}, n: {s}, e: {s}", .{ signature.?, timestamp.?, nonce.?, echostr orelse "" });
+    log.debug("s: {s}, t: {s}, n: {s}, e: {s}", .{ signature.?, timestamp.?, nonce.?, echostr orelse "" });
 
     var params = [_][]const u8{ app.config.wx.token, timestamp.?, nonce.? };
 
     std.mem.sort([]const u8, &params, {}, utils.text.StringOrder.asc);
     for (params) |it| {
-        std.log.debug("{s}", .{it});
+        log.debug("{s}", .{it});
     }
 
     const combined = try std.mem.concat(resp.arena, u8, &params);
-    std.log.debug("combined: {s}", .{combined});
+    log.debug("combined: {s}", .{combined});
 
     var digest: [std.crypto.hash.Sha1.digest_length]u8 = undefined;
     std.crypto.hash.Sha1.hash(combined, &digest, .{});
 
     var hex: [std.crypto.hash.Sha1.digest_length * 2]u8 = undefined;
     _ = std.fmt.bufPrint(&hex, "{s}", .{std.fmt.fmtSliceHexLower(&digest)}) catch unreachable;
-    std.log.debug("hex: {s}", .{hex});
+    log.debug("hex: {s}", .{hex});
 
     if (std.mem.eql(u8, &hex, signature.?)) {
         resp.body = echostr.?;
@@ -60,7 +63,7 @@ fn verifySignature(app: *App, req: *httpz.Request, resp: *httpz.Response) !void 
 
 fn handleMessage(app: *App, req: *httpz.Request, resp: *httpz.Response) !void {
     const req_body = req.body().?;
-    std.log.debug("received req_body: {s}", .{req_body});
+    log.debug("received req_body: {s}", .{req_body});
 
     const nodes = try utils.xml.readTextAsNodes(resp.arena, req_body);
     defer {
@@ -89,10 +92,23 @@ fn handleMessage(app: *App, req: *httpz.Request, resp: *httpz.Response) !void {
             },
             .text, .image, .voice, .video, .shortvideo, .location, .link => {
                 const to_user_name = try utils.collection.findFirst(*XmlNode, nodes, xmlNodeNamePredicate("ToUserName"));
+                const content = try utils.collection.findFirst(*XmlNode, nodes, xmlNodeNamePredicate("Content"));
+
+                var out_content: []const u8 = undefined;
+                if (!utils.text.isEmptyStr(content.element_value)) {
+                    const model = try app.llm_client.chatCompletion(llm.Provider.AliQwenTurbo, content.element_value.?);
+                    defer model.deinit();
+
+                    out_content = try resp.arena.dupe(u8, model.value.choices[0].message.content);
+                } else {
+                    out_content = "来都来了，说点什么吧 😊";
+                }
+
                 resp_body = try handleNormalMessage(
                     resp.arena,
                     from_user_name.element_value.?,
                     to_user_name.element_value.?,
+                    out_content,
                 );
             },
         }
@@ -121,7 +137,12 @@ fn handleEvent(ctx: db.QueryContext, event: []const u8, from_user_name: []const 
     return "success";
 }
 
-fn handleNormalMessage(allocator: std.mem.Allocator, from_user_name: []const u8, to_user_name: []const u8) ![]const u8 {
+fn handleNormalMessage(
+    allocator: std.mem.Allocator,
+    from_user_name: []const u8,
+    to_user_name: []const u8,
+    content: []const u8,
+) ![]const u8 {
     const text_output_template =
         \\<xml>
         \\  <ToUserName><![CDATA[{s}]]></ToUserName>
@@ -133,7 +154,7 @@ fn handleNormalMessage(allocator: std.mem.Allocator, from_user_name: []const u8,
     ;
 
     const create_time: i64 = @divFloor(std.time.milliTimestamp(), 1000);
-    const content = "handle normal message";
+
     return try std.fmt.allocPrint(allocator, text_output_template, .{
         from_user_name,
         to_user_name,

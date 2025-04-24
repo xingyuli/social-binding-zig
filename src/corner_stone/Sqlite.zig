@@ -15,6 +15,8 @@ const SqliteError = error{
 pub const ResultRow = std.StringHashMap(?[]u8);
 pub const ResultSet = std.ArrayList(ResultRow);
 
+const log = std.log.scoped(.corner_stone__sqlite);
+
 const Self = @This();
 
 pub fn init(filename: []const u8) SqliteError!Self {
@@ -26,7 +28,7 @@ pub fn init(filename: []const u8) SqliteError!Self {
     var db: ?*c.sqlite3 = null;
     const rc = c.sqlite3_open(c_filename, &db);
     if (rc != c.SQLITE_OK) {
-        std.log.debug("Cannot open database: {s}", .{c.sqlite3_errmsg(db)});
+        log.debug("Cannot open database: {s}", .{c.sqlite3_errmsg(db)});
         return SqliteError.DatabaseOpenFailed;
     }
 
@@ -50,17 +52,17 @@ pub fn exec(self: Self, arena: Allocator, sql: []const u8) SqliteError!*ResultSe
     var err_msg: [*c]u8 = null;
     const rc_select = c.sqlite3_exec(self.db, c_sql, query_callback, &result_set, &err_msg);
     if (rc_select != c.SQLITE_OK) {
-        std.log.debug("SQL error: {s}", .{err_msg});
+        log.debug("SQL error: {s}", .{err_msg});
         c.sqlite3_free(err_msg);
         return SqliteError.QueryFailed;
     }
 
-    std.log.debug("Query executed successfully: {s}", .{sql});
+    log.debug("Query executed successfully: {s}", .{sql});
 
     for (result_set.items) |it| {
         var iter = it.iterator();
         while (iter.next()) |kv| {
-            std.log.debug("{s}: {?s}", .{ kv.key_ptr.*, kv.value_ptr.* });
+            log.debug("{s}: {?s}", .{ kv.key_ptr.*, kv.value_ptr.* });
         }
     }
 

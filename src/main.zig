@@ -5,6 +5,7 @@ const App = @import("app.zig");
 const routes = @import("routes/routes.zig");
 
 const Sqlite = @import("corner_stone/Sqlite.zig");
+const llm = @import("middleware/llm.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -20,9 +21,13 @@ pub fn main() !void {
     var sqlite = try Sqlite.init(app_config.value.db_file);
     defer sqlite.deinit();
 
+    var llm_client = try llm.Client.init(app_config.value.llm_api_key, allocator);
+    defer llm_client.deinit();
+
     var app = App{
         .config = &app_config.value,
         .sqlite = &sqlite,
+        .llm_client = &llm_client,
     };
 
     var server = try httpz.Server(*App).init(allocator, .{ .port = 5882 }, &app);
