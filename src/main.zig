@@ -26,7 +26,10 @@ pub fn main() !void {
     };
 
     var server = try httpz.Server(*App).init(allocator, .{ .port = 5882 }, &app);
-    defer server.deinit();
+    defer {
+        server.stop();
+        server.deinit();
+    }
 
     routes.create(try server.router(.{}));
 

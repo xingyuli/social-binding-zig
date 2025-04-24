@@ -12,9 +12,7 @@ pub fn mount(group: *Group(*App, Action(*App))) void {
     group.get("/users", countUsers, .{});
 }
 
-fn countUsers(app: *App, req: *httpz.Request, resp: *httpz.Response) !void {
-    _ = req;
-
+fn countUsers(app: *App, _: *httpz.Request, resp: *httpz.Response) !void {
     const result = db.account.countGrouped(.{
         .sqlite = app.sqlite,
         .arena = resp.arena,

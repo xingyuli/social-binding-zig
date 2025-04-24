@@ -32,24 +32,24 @@ fn verifySignature(app: *App, req: *httpz.Request, resp: *httpz.Response) !void 
         return;
     }
 
-    std.debug.print("s: {s}, t: {s}, n: {s}, e: {s}\n", .{ signature.?, timestamp.?, nonce.?, echostr orelse "" });
+    std.log.debug("s: {s}, t: {s}, n: {s}, e: {s}", .{ signature.?, timestamp.?, nonce.?, echostr orelse "" });
 
     var params = [_][]const u8{ app.config.wx.token, timestamp.?, nonce.? };
 
     std.mem.sort([]const u8, &params, {}, utils.text.StringOrder.asc);
     for (params) |it| {
-        std.debug.print("{s}\n", .{it});
+        std.log.debug("{s}", .{it});
     }
 
     const combined = try std.mem.concat(resp.arena, u8, &params);
-    std.debug.print("combined: {s}\n", .{combined});
+    std.log.debug("combined: {s}", .{combined});
 
     var digest: [std.crypto.hash.Sha1.digest_length]u8 = undefined;
     std.crypto.hash.Sha1.hash(combined, &digest, .{});
 
     var hex: [std.crypto.hash.Sha1.digest_length * 2]u8 = undefined;
     _ = std.fmt.bufPrint(&hex, "{s}", .{std.fmt.fmtSliceHexLower(&digest)}) catch unreachable;
-    std.debug.print("hex: {s}\n", .{hex});
+    std.log.debug("hex: {s}", .{hex});
 
     if (std.mem.eql(u8, &hex, signature.?)) {
         resp.body = echostr.?;
@@ -60,7 +60,7 @@ fn verifySignature(app: *App, req: *httpz.Request, resp: *httpz.Response) !void 
 
 fn handleMessage(app: *App, req: *httpz.Request, resp: *httpz.Response) !void {
     const req_body = req.body().?;
-    std.debug.print("received req_body: {s}\n", .{req_body});
+    std.log.debug("received req_body: {s}", .{req_body});
 
     const nodes = try utils.xml.readTextAsNodes(resp.arena, req_body);
     defer {

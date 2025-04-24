@@ -83,7 +83,7 @@ fn readAsNodes(allocator: Allocator, reader: anytype) !std.ArrayList(*XmlNode) {
                 // std.debug.print("  cdata of {s}: {s}\n", .{ current_node.?.elemement_name, cdata });
                 current_node.?.element_value = try allocator.dupe(u8, cdata);
             },
-            else => std.debug.print(":( node type: {}\n", .{node}),
+            else => std.log.debug(":( node type: {}", .{node}),
         }
     }
 
