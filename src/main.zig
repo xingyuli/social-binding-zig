@@ -7,6 +7,8 @@ const routes = @import("routes/routes.zig");
 const Sqlite = @import("corner_stone/Sqlite.zig");
 const llm = @import("middleware/llm.zig");
 
+const utils = @import("utils/utils.zig");
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer std.debug.assert(gpa.deinit() == .ok);
@@ -24,10 +26,13 @@ pub fn main() !void {
     var llm_client = try llm.Client.init(app_config.value.llm_api_key, allocator);
     defer llm_client.deinit();
 
+    var llm_cache = try utils.collection.BlockingStringMap([]const u8).init(allocator);
+
     var app = App{
         .config = &app_config.value,
         .sqlite = &sqlite,
         .llm_client = &llm_client,
+        .llm_cache = &llm_cache,
     };
 
     var server = try httpz.Server(*App).init(allocator, .{ .port = 5882 }, &app);

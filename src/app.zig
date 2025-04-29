@@ -3,10 +3,13 @@ const std = @import("std");
 const httpz = @import("httpz");
 const Sqlite = @import("corner_stone/Sqlite.zig");
 const llm = @import("middleware/llm.zig");
+const utils = @import("utils/utils.zig");
 
 config: *Config,
 sqlite: *Sqlite,
+
 llm_client: *llm.Client,
+llm_cache: *utils.collection.BlockingStringMap([]const u8),
 
 const log = std.log.scoped(.app);
 

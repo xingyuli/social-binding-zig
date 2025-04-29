@@ -93,13 +93,26 @@ fn handleMessage(app: *App, req: *httpz.Request, resp: *httpz.Response) !void {
             .text, .image, .voice, .video, .shortvideo, .location, .link => {
                 const to_user_name = try utils.collection.findFirst(*XmlNode, nodes, xmlNodeNamePredicate("ToUserName"));
                 const content = try utils.collection.findFirst(*XmlNode, nodes, xmlNodeNamePredicate("Content"));
+                const msg_id = try utils.collection.findFirst(*XmlNode, nodes, xmlNodeNamePredicate("MsgId"));
 
                 var out_content: []const u8 = undefined;
                 if (!utils.text.isEmptyStr(content.element_value)) {
-                    const model = try app.llm_client.chatCompletion(llm.Provider.AliQwenTurbo, content.element_value.?);
-                    defer model.deinit();
+                    const msg_id_value = msg_id.element_value.?;
+                    const cached_result = app.llm_cache.get(msg_id_value);
 
-                    out_content = try resp.arena.dupe(u8, model.value.choices[0].message.content);
+                    if (cached_result) |r| {
+                        out_content = r;
+                    } else {
+                        app.llm_cache.lock(msg_id_value);
+                        defer app.llm_cache.unlock(msg_id_value);
+
+                        const model = try app.llm_client.chatCompletion(llm.Provider.SparkLite, content.element_value.?);
+                        defer model.deinit();
+
+                        const answer = try app.llm_cache.allocator.dupe(u8, model.value.choices[0].message.content);
+                        try app.llm_cache.putRaw(try app.llm_cache.allocator.dupe(u8, msg_id_value), answer);
+                        out_content = answer;
+                    }
                 } else {
                     out_content = "来都来了，说点什么吧 😊";
                 }

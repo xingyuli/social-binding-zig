@@ -31,6 +31,12 @@ pub const Provider = struct {
         .api_path_chat_completions = "/chat/completions",
         .model = "qwen-turbo",
     };
+
+    pub const SparkLite = Provider{
+        .base_url = "https://spark-api-open.xf-yun.com/v1",
+        .api_path_chat_completions = "/chat/completions",
+        .model = "lite",
+    };
 };
 
 pub const Client = struct {
@@ -126,10 +132,12 @@ pub const ModelMessage = struct {
 };
 
 pub const ResponseModel = struct {
-    id: []const u8,
-    object: []const u8,
-    created: u32,
-    model: []const u8,
+    // not returned by SparkLite
+    // id: []const u8,
+    // object: []const u8,
+    // created: u32,
+    // model: []const u8,
+
     choices: []ModelChoice,
     usage: ModelUsage,
 };
@@ -137,7 +145,9 @@ pub const ResponseModel = struct {
 const ModelChoice = struct {
     index: u8,
     message: ModelMessage,
-    finish_reason: []const u8,
+
+    // not returned by SparkLite
+    // finish_reason: []const u8,
 };
 
 const ModelUsage = struct {
