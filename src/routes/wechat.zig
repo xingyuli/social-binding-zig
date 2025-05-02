@@ -109,8 +109,8 @@ fn handleMessage(app: *App, req: *httpz.Request, resp: *httpz.Response) !void {
                         const model = try app.llm_client.chatCompletion(llm.Provider.SparkLite, content.element_value.?);
                         defer model.deinit();
 
-                        const answer = try app.llm_cache.allocator.dupe(u8, model.value.choices[0].message.content);
-                        try app.llm_cache.putRaw(try app.llm_cache.allocator.dupe(u8, msg_id_value), answer);
+                        const answer = model.value.choices[0].message.content;
+                        try app.llm_cache.putRaw(msg_id_value, answer);
                         out_content = answer;
                     }
                 } else {

@@ -47,4 +47,13 @@ pub fn build(b: *std.Build) void {
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
+
+    const collection_tests = b.addTest(.{
+        .root_source_file = b.path("src/utils/collection.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_collection_tests = b.addRunArtifact(collection_tests);
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_collection_tests.step);
 }

@@ -22,13 +22,27 @@ const Locks = std.ArrayList(std.Thread.Mutex);
 
 fn TimestampedValue(comptime V: type) type {
     return struct {
+        const Self = @This();
+
         value: V,
         milli_ts: i64,
+
+        fn of(value: V) Self {
+            return .{
+                .value = value,
+                .milli_ts = std.time.milliTimestamp(),
+            };
+        }
     };
 }
 
+/// Key and value memory are all managed by this map. Deinitialize with `deinit`.
 // TODO sharded locking cannot protect concurrent resizing, extra cooperation is needed
 pub fn BlockingStringMap(comptime V: type) type {
+    // Restrict V to []const u8 for now
+    // TODO consider generic V
+    if (V != []const u8) @compileError("BlockingStringMap only supports V = []const u8");
+
     return struct {
         const Self = @This();
 
@@ -55,7 +69,12 @@ pub fn BlockingStringMap(comptime V: type) type {
             };
         }
 
-        pub fn deinit(self: Self) void {
+        pub fn deinit(self: *Self) void {
+            self.cleanup(null, null) catch |err| {
+                std.debug.print("deinit cleanup error: {}\n", .{err});
+                return;
+            };
+
             self.locks.deinit();
             self.allocator.destroy(self.locks);
 
@@ -63,24 +82,45 @@ pub fn BlockingStringMap(comptime V: type) type {
             self.allocator.destroy(self.m);
         }
 
-        fn cleanup(self: *Self) !void {
+        fn cleanup(self: *Self, exclude_key: ?[]const u8, age_limit_in_sec: ?i64) !void {
+            // TODO this lock all mutex, possible to optimize?
+            for (self.locks.items) |*l| l.lock();
+            defer for (self.locks.items) |*l| l.unlock();
+
             var keys_to_remove = std.ArrayList([]const u8).init(self.allocator);
+            defer keys_to_remove.deinit();
 
             var iter = self.m.iterator();
             while (iter.next()) |kv| {
-                const tsv = kv.value_ptr.*;
-                const age = std.time.milliTimestamp() - tsv.milli_ts;
-                if (age > 1000 * 30) {
-                    try keys_to_remove.append(kv.key_ptr.*);
+                if (age_limit_in_sec) |sec| {
+                    const age = std.time.milliTimestamp() - kv.value_ptr.*.milli_ts;
+                    if (age > 1000 * sec) {
+                        if (exclude_key == null or !std.mem.eql(u8, exclude_key.?, kv.key_ptr.*)) {
+                            try keys_to_remove.append(kv.key_ptr.*);
+                        }
+                    }
+                } else {
+                    if (exclude_key == null or !std.mem.eql(u8, exclude_key.?, kv.key_ptr.*)) {
+                        try keys_to_remove.append(kv.key_ptr.*);
+                    }
                 }
             }
 
             for (keys_to_remove.items) |k| {
+                const v = self.m.get(k);
+
                 _ = self.m.remove(k);
+
+                if (v) |it| {
+                    self.allocator.free(it.value);
+                }
+
                 std.debug.print(
                     "tid:{} time:{} fn:cleanup | remove key: {s}\n",
                     .{ std.Thread.getCurrentId(), std.time.nanoTimestamp(), k },
                 );
+
+                self.allocator.free(k);
             }
         }
 
@@ -88,16 +128,21 @@ pub fn BlockingStringMap(comptime V: type) type {
             const result = try self.guard(
                 "put",
                 key,
-                value,
+                .{ .direct = value },
                 struct {
                     fn callback(ctx: GuardContext) Allocator.Error!GuardResult {
-                        const v = TSV{ .value = ctx.value.?, .milli_ts = std.time.milliTimestamp() };
-                        return .{ .put = try ctx.self.m.put(ctx.key, v) };
+                        freeOldValueIfExists(ctx.self, ctx.key);
+
+                        // value is guaranteed non-null for put
+                        try ctx.self.m.put(
+                            ctx.key,
+                            try createTSV(ctx.self, ctx.value.?.direct.?),
+                        );
+
+                        return .{ .put = {} };
                     }
                 }.callback,
             );
-
-            // self.cleanup() catch unreachable;
 
             switch (result) {
                 .put => return,
@@ -106,19 +151,21 @@ pub fn BlockingStringMap(comptime V: type) type {
         }
 
         pub fn putWithValueFn(self: *Self, key: []const u8, value: fn () V) Allocator.Error!void {
-            const result = try self.guardFn(
+            const result = try self.guard(
                 "put",
                 key,
-                value,
+                .{ .fn_ptr = value },
                 struct {
-                    fn callback(ctx: GuardFnContext) Allocator.Error!GuardResult {
-                        const v = TSV{ .value = ctx.value.?(), .milli_ts = std.time.milliTimestamp() };
-                        return .{ .put = try ctx.self.m.put(ctx.key, v) };
+                    fn callback(ctx: GuardContext) Allocator.Error!GuardResult {
+                        freeOldValueIfExists(ctx.self, ctx.key);
+                        try ctx.self.m.put(
+                            ctx.key,
+                            try createTSV(ctx.self, ctx.value.?.fn_ptr.?()),
+                        );
+                        return .{ .put = {} };
                     }
                 }.callback,
             );
-
-            // self.cleanup() catch unreachable;
 
             switch (result) {
                 .put => return,
@@ -127,10 +174,31 @@ pub fn BlockingStringMap(comptime V: type) type {
         }
 
         pub fn putRaw(self: *Self, key: []const u8, value: V) Allocator.Error!void {
-            const v = TSV{ .value = value, .milli_ts = std.time.milliTimestamp() };
-            try self.m.put(key, v);
+            self.freeOldValueIfExists(key);
+            try self.m.put(
+                try self.getManagedKey(key),
+                try self.createTSV(value),
+            );
+        }
 
-            // self.cleanup() catch unreachable;
+        fn freeOldValueIfExists(self: *Self, key: []const u8) void {
+            if (self.m.contains(key)) {
+                const old_v = self.m.get(key);
+                if (old_v) |it| {
+                    self.allocator.free(it.value);
+                }
+            }
+        }
+
+        fn getManagedKey(self: *Self, unmanaged_key: []const u8) ![]const u8 {
+            if (self.m.getKey(unmanaged_key)) |managed_key| {
+                return managed_key;
+            }
+            return try self.allocator.dupe(u8, unmanaged_key);
+        }
+
+        fn createTSV(self: *Self, unmanaged_value: V) Allocator.Error!TSV {
+            return TSV.of(try self.allocator.dupe(u8, unmanaged_value));
         }
 
         pub fn get(self: *Self, key: []const u8) ?V {
@@ -144,9 +212,12 @@ pub fn BlockingStringMap(comptime V: type) type {
                         return .{ .get = if (v) |it| it.value else null };
                     }
                 }.callback,
-            ) catch unreachable;
+            ) catch |err| {
+                std.debug.print("Error in get: {}\n", .{err});
+                return null;
+            };
 
-            self.cleanup() catch |err| {
+            self.cleanup(key, 30) catch |err| {
                 std.debug.print("cleanup error: {}\n", .{err});
                 return null;
             };
@@ -157,10 +228,15 @@ pub fn BlockingStringMap(comptime V: type) type {
             }
         }
 
+        const GuardValue = union(enum) {
+            direct: ?V,
+            fn_ptr: ?*const fn () V,
+        };
+
         const GuardContext = struct {
             self: *Self,
             key: []const u8,
-            value: ?V, // Optional value for put
+            value: ?GuardValue,
         };
 
         const GuardResult = union(enum) {
@@ -170,7 +246,13 @@ pub fn BlockingStringMap(comptime V: type) type {
 
         const GuardCallback = fn (ctx: GuardContext) Allocator.Error!GuardResult;
 
-        fn guard(self: *Self, op: []const u8, key: []const u8, value: ?V, comptime callback: GuardCallback) Allocator.Error!GuardResult {
+        fn guard(
+            self: *Self,
+            op: []const u8,
+            key: []const u8,
+            value: ?GuardValue,
+            comptime callback: GuardCallback,
+        ) Allocator.Error!GuardResult {
             const hash = self.m.ctx.hash(key);
             const lock_index: u64 = hash % self.locks.items.len;
 
@@ -179,6 +261,7 @@ pub fn BlockingStringMap(comptime V: type) type {
                 .{ std.Thread.getCurrentId(), std.time.nanoTimestamp(), op, key, hash, lock_index },
             );
 
+            // TODO support re-entrancy
             var l = &self.locks.items[lock_index];
             {
                 l.lock();
@@ -195,13 +278,17 @@ pub fn BlockingStringMap(comptime V: type) type {
                 );
             }
 
+            const managed_key = try self.getManagedKey(key);
+            defer if (!self.m.contains(managed_key)) self.allocator.free(managed_key);
+
             return callback(.{
                 .self = self,
-                .key = key,
+                .key = managed_key,
                 .value = value,
             });
         }
 
+        /// Must be paired with `unlock` to avoid deadlock.
         pub fn lock(self: *Self, key: []const u8) void {
             const hash = self.m.ctx.hash(key);
             const lock_index: u64 = hash % self.locks.items.len;
@@ -210,6 +297,7 @@ pub fn BlockingStringMap(comptime V: type) type {
             l.lock();
         }
 
+        // Must be called after `lock` to release the mutex.
         pub fn unlock(self: *Self, key: []const u8) void {
             const hash = self.m.ctx.hash(key);
             const lock_index: u64 = hash % self.locks.items.len;
@@ -217,45 +305,113 @@ pub fn BlockingStringMap(comptime V: type) type {
             const l = &self.locks.items[lock_index];
             l.unlock();
         }
+    };
+}
 
-        const GuardFnContext = struct {
-            self: *Self,
-            key: []const u8,
-            value: ?*const fn () V,
-        };
+const testing = std.testing;
 
-        const GuardFnCallback = fn (ctx: GuardFnContext) Allocator.Error!GuardResult;
+test "BlockingStringMap basic put and get" {
+    var map = try BlockingStringMap([]const u8).init(testing.allocator);
+    defer map.deinit();
 
-        fn guardFn(self: *Self, op: []const u8, key: []const u8, value: ?*const fn () V, comptime callback: GuardFnCallback) Allocator.Error!GuardResult {
-            const hash = self.m.ctx.hash(key);
-            const lock_index: u64 = hash % self.locks.items.len;
+    try map.put("k1", "v1");
 
-            std.debug.print(
-                "tid:{} time:{} fn:guardFn | op: {s}, key: {s}, hash: {d}, lock_index: {d}\n",
-                .{ std.Thread.getCurrentId(), std.time.nanoTimestamp(), op, key, hash, lock_index },
-            );
+    try testing.expectEqualStrings("v1", map.get("k1").?);
+    try testing.expectEqual(null, map.get("k2"));
+}
 
-            var l = &self.locks.items[lock_index];
-            {
-                l.lock();
-                std.debug.print(
-                    "tid:{} time:{} fn:guardFn | op: {s}, key: {s}, hash: {d}, lock_index: {d}, lock addr: {*} accuquired\n",
-                    .{ std.Thread.getCurrentId(), std.time.nanoTimestamp(), op, key, hash, lock_index, l },
-                );
-            }
-            defer {
-                l.unlock();
-                std.debug.print(
-                    "tid:{} time:{} fn:guardFn | op: {s}, key: {s}, hash: {d}, lock_index: {d}, lock addr: {*} released\n",
-                    .{ std.Thread.getCurrentId(), std.time.nanoTimestamp(), op, key, hash, lock_index, l },
-                );
-            }
+test "BlockingStringMap putWithValueFn" {
+    var map = try BlockingStringMap([]const u8).init(testing.allocator);
+    defer map.deinit();
 
-            return callback(.{
-                .self = self,
-                .key = key,
-                .value = value,
-            });
+    const valueFn = struct {
+        fn getValue() []const u8 {
+            return "v";
+        }
+    }.getValue;
+
+    try map.putWithValueFn("k", valueFn);
+
+    try testing.expectEqualStrings("v", map.get("k").?);
+}
+
+test "BlockingStringMap concurrent put and get" {
+    var map = try BlockingStringMap([]const u8).init(testing.allocator);
+    defer map.deinit();
+
+    const Worker = struct {
+        fn putWorker(m: *BlockingStringMap([]const u8)) !void {
+            try m.put("k", "v");
+        }
+        fn getWorker(m: *BlockingStringMap([]const u8)) !void {
+            std.Thread.sleep(std.time.ns_per_ms * 100); // Wait for put
+            try testing.expectEqualStrings("v", m.get("k").?);
         }
     };
+
+    const t1 = try std.Thread.spawn(.{}, Worker.putWorker, .{&map});
+    const t2 = try std.Thread.spawn(.{}, Worker.getWorker, .{&map});
+
+    t1.join();
+    t2.join();
+}
+
+test "BlockingStringMap cleanup age-based" {
+    var map = try BlockingStringMap([]const u8).init(testing.allocator);
+    defer map.deinit();
+
+    try map.put("k1", "v1");
+    try map.put("k2", "v2");
+
+    // Set custom timestamps to simulate old entries
+    var iter = map.m.iterator();
+    while (iter.next()) |kv| {
+        kv.value_ptr.milli_ts = std.time.milliTimestamp() - 40_000;
+    }
+
+    // Insert a fresh key
+    try map.put("k3", "v3");
+
+    // Cleanup entries older than 30 seconds, exclude k3
+    try map.cleanup("k3", 30);
+
+    try testing.expectEqual(null, map.get("k1"));
+    try testing.expectEqual(null, map.get("k2"));
+    try testing.expectEqualStrings("v3", map.get("k3").?);
+}
+
+test "BlockingStringMap memory management" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+
+    const allocator = gpa.allocator();
+
+    var map = try BlockingStringMap([]const u8).init(allocator);
+    try map.put("k1", "v1");
+    try map.put("k2", "v2");
+
+    // `get` triggers `cleanup`, but no keys' age is old enough
+    _ = map.get("k1");
+    try testing.expectEqual(true, map.m.contains("k1") and map.m.contains("k2"));
+
+    // deinit will free remaning resources
+    map.deinit();
+
+    // Check for leaks via gpa.deinit()
+}
+
+test "BlockingStringMap manual lock and unlock" {
+    var map = try BlockingStringMap([]const u8).init(testing.allocator);
+    defer map.deinit();
+
+    // Separated code block scope, otherwise the consequent `map.get` will panic
+    // with Deadlock. Current Zig `Mutex` is not re-entrant-able.
+    {
+        map.lock("k1");
+        defer map.unlock("k1");
+
+        try map.putRaw("k1", "v1");
+    }
+
+    try testing.expectEqualStrings("v1", map.get("k1").?);
 }
