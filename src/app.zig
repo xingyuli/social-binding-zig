@@ -9,7 +9,7 @@ config: *Config,
 sqlite: *Sqlite,
 
 llm_client: *llm.Client,
-llm_cache: *utils.collection.BlockingStringMap([]const u8),
+llm_cache: *utils.collection.BlockingStringMap(),
 
 const log = std.log.scoped(.app);
 

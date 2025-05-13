@@ -36,12 +36,39 @@ fn TimestampedValue(comptime V: type) type {
     };
 }
 
+pub fn BlockingStringMap() type {
+    return BlockingMap([]const u8, StringHandler);
+}
+
+pub const StringHandler = struct {
+    pub fn clone(allocator: Allocator, v: []const u8) Allocator.Error![]const u8 {
+        return allocator.dupe(u8, v);
+    }
+
+    pub fn free(allocator: Allocator, v: []const u8) void {
+        allocator.free(v);
+    }
+};
+
 /// Key and value memory are all managed by this map. Deinitialize with `deinit`.
+/// Handler defines how to clone and free values of type V.
 // TODO sharded locking cannot protect concurrent resizing, extra cooperation is needed
-pub fn BlockingStringMap(comptime V: type) type {
-    // Restrict V to []const u8 for now
-    // TODO consider generic V
-    if (V != []const u8) @compileError("BlockingStringMap only supports V = []const u8");
+pub fn BlockingMap(comptime V: type, comptime Handler: type) type {
+    comptime {
+        if (!@hasDecl(Handler, "clone") or !@hasDecl(Handler, "free")) {
+            @compileError("Handler must have clone and free methods");
+        }
+
+        const clone_type = @TypeOf(Handler.clone);
+        if (clone_type != fn (Allocator, V) Allocator.Error!V) {
+            @compileError("Handler.close must have signature `fn(Allocator, V) Allocator.Error!V`");
+        }
+
+        const free_type = @TypeOf(Handler.free);
+        if (free_type != fn (Allocator, V) void) {
+            @compileError("Handler.free must have signature `fn(Allocator, V) void`");
+        }
+    }
 
     return struct {
         const Self = @This();
@@ -112,7 +139,7 @@ pub fn BlockingStringMap(comptime V: type) type {
                 _ = self.m.remove(k);
 
                 if (v) |it| {
-                    self.allocator.free(it.value);
+                    Handler.free(self.allocator, it.value);
                 }
 
                 std.debug.print(
@@ -185,7 +212,7 @@ pub fn BlockingStringMap(comptime V: type) type {
             if (self.m.contains(key)) {
                 const old_v = self.m.get(key);
                 if (old_v) |it| {
-                    self.allocator.free(it.value);
+                    Handler.free(self.allocator, it.value);
                 }
             }
         }
@@ -198,7 +225,7 @@ pub fn BlockingStringMap(comptime V: type) type {
         }
 
         fn createTSV(self: *Self, unmanaged_value: V) Allocator.Error!TSV {
-            return TSV.of(try self.allocator.dupe(u8, unmanaged_value));
+            return TSV.of(try Handler.clone(self.allocator, unmanaged_value));
         }
 
         pub fn get(self: *Self, key: []const u8) ?V {
@@ -311,7 +338,7 @@ pub fn BlockingStringMap(comptime V: type) type {
 const testing = std.testing;
 
 test "BlockingStringMap basic put and get" {
-    var map = try BlockingStringMap([]const u8).init(testing.allocator);
+    var map = try BlockingStringMap().init(testing.allocator);
     defer map.deinit();
 
     try map.put("k1", "v1");
@@ -321,7 +348,7 @@ test "BlockingStringMap basic put and get" {
 }
 
 test "BlockingStringMap putWithValueFn" {
-    var map = try BlockingStringMap([]const u8).init(testing.allocator);
+    var map = try BlockingStringMap().init(testing.allocator);
     defer map.deinit();
 
     const valueFn = struct {
@@ -336,14 +363,14 @@ test "BlockingStringMap putWithValueFn" {
 }
 
 test "BlockingStringMap concurrent put and get" {
-    var map = try BlockingStringMap([]const u8).init(testing.allocator);
+    var map = try BlockingStringMap().init(testing.allocator);
     defer map.deinit();
 
     const Worker = struct {
-        fn putWorker(m: *BlockingStringMap([]const u8)) !void {
+        fn putWorker(m: *BlockingStringMap()) !void {
             try m.put("k", "v");
         }
-        fn getWorker(m: *BlockingStringMap([]const u8)) !void {
+        fn getWorker(m: *BlockingStringMap()) !void {
             std.Thread.sleep(std.time.ns_per_ms * 100); // Wait for put
             try testing.expectEqualStrings("v", m.get("k").?);
         }
@@ -357,7 +384,7 @@ test "BlockingStringMap concurrent put and get" {
 }
 
 test "BlockingStringMap cleanup age-based" {
-    var map = try BlockingStringMap([]const u8).init(testing.allocator);
+    var map = try BlockingStringMap().init(testing.allocator);
     defer map.deinit();
 
     try map.put("k1", "v1");
@@ -386,7 +413,7 @@ test "BlockingStringMap memory management" {
 
     const allocator = gpa.allocator();
 
-    var map = try BlockingStringMap([]const u8).init(allocator);
+    var map = try BlockingStringMap().init(allocator);
     try map.put("k1", "v1");
     try map.put("k2", "v2");
 
@@ -401,7 +428,7 @@ test "BlockingStringMap memory management" {
 }
 
 test "BlockingStringMap manual lock and unlock" {
-    var map = try BlockingStringMap([]const u8).init(testing.allocator);
+    var map = try BlockingStringMap().init(testing.allocator);
     defer map.deinit();
 
     // Separated code block scope, otherwise the consequent `map.get` will panic
@@ -415,3 +442,47 @@ test "BlockingStringMap manual lock and unlock" {
 
     try testing.expectEqualStrings("v1", map.get("k1").?);
 }
+
+// const ArrayListStringHandler = struct {
+//     fn clone(allocator: Allocator, value: std.ArrayList([]const u8)) Allocator.Error!std.ArrayList([]const u8) {
+//         var new_list = std.ArrayList([]const u8).init(allocator);
+//         try new_list.ensureTotalCapacity(value.items.len);
+//         for (value.items) |item| {
+//             try new_list.append(try allocator.dupe(u8, item));
+//         }
+//         std.debug.print("addr of cloned list: {*}\n", .{&new_list});
+//         return new_list;
+//     }
+
+//     fn free(allocator: Allocator, value: std.ArrayList([]const u8)) void {
+//         for (value.items) |item| {
+//             allocator.free(item);
+//         }
+//         value.deinit();
+//     }
+// };
+
+// test "BlockingMap basic put and get with ArrayList([]const u8)" {
+//     var map = try BlockingMap(std.ArrayList([]const u8), ArrayListStringHandler).init(testing.allocator);
+//     defer map.deinit();
+
+//     var list = std.ArrayList([]const u8).init(testing.allocator);
+//     try list.append(try testing.allocator.dupe(u8, "item1"));
+//     try list.append(try testing.allocator.dupe(u8, "item2"));
+
+//     try map.put("k1", list);
+
+//     if (map.get("k1")) |value| {
+//         std.debug.print("{*}\n", .{&value});
+
+//         try testing.expectEqual(2, value.items.len);
+//         try testing.expectEqualStrings("item1", value.items[0]);
+//         try testing.expectEqualStrings("item2", value.items[1]);
+//     } else {
+//         try testing.expect(false);
+//     }
+
+//     try testing.expectEqual(null, map.get("k2"));
+
+//     ArrayListStringHandler.free(testing.allocator, list);
+// }

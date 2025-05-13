@@ -26,7 +26,7 @@ pub fn main() !void {
     var llm_client = try llm.Client.init(app_config.value.llm_api_key, allocator);
     defer llm_client.deinit();
 
-    var llm_cache = try utils.collection.BlockingStringMap([]const u8).init(allocator);
+    var llm_cache = try utils.collection.BlockingStringMap().init(allocator);
 
     var app = App{
         .config = &app_config.value,
