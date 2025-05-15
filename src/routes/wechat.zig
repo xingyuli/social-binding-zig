@@ -104,7 +104,7 @@ fn handleMessage(app: *App, req: *httpz.Request, resp: *httpz.Response) !void {
                     log.debug("cache size: {d}", .{app.llm_session_cache.m.count()});
 
                     // extend session
-                    app.llm_session_cache.refesh(from_user_name_value);
+                    app.llm_session_cache.refresh(from_user_name_value);
 
                     const cached_result = app.llm_session_cache.get(from_user_name_value);
 

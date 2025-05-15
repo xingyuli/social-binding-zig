@@ -135,11 +135,16 @@ pub fn BlockingMap(comptime V: type, comptime Handler: type) type {
             self.allocator.destroy(self.m);
         }
 
-        pub fn refesh(self: *Self, key: []const u8) void {
-            if (self.m.contains(key)) {
-                const v = self.m.getPtr(key).?;
-                v.milli_ts = std.time.milliTimestamp();
-            }
+        pub fn refresh(self: *Self, key: []const u8) void {
+            _ = self.guard("refresh", key, null, struct {
+                fn callback(ctx: GuardContext) Allocator.Error!GuardResult {
+                    const v = ctx.self.m.getPtr(ctx.key);
+                    if (v) |vv| {
+                        vv.milli_ts = std.time.milliTimestamp();
+                    }
+                    return .{ .get = null };
+                }
+            }.callback) catch unreachable;
         }
 
         pub fn cleanup(self: *Self, exclude_key: ?[]const u8, age_limit_in_sec: ?i64) !void {
