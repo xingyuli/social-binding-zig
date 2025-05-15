@@ -8,6 +8,9 @@ pub const Provider = struct {
     api_path_chat_completions: []const u8,
     model: []const u8,
 
+    in_limit: i32 = -1,
+    out_limit: i32 = -1,
+
     pub const DeepSeek = Provider{
         .base_url = "https://api.deepseek.com",
         .api_path_chat_completions = "/chat/completions",
@@ -36,6 +39,12 @@ pub const Provider = struct {
         .base_url = "https://spark-api-open.xf-yun.com/v1",
         .api_path_chat_completions = "/chat/completions",
         .model = "lite",
+
+        // 最大输入长度: 8K
+        .in_limit = 1024 * 8,
+
+        // 最大输出长度: 4K
+        .out_limit = 1024 * 4,
     };
 };
 
@@ -65,6 +74,21 @@ pub const Client = struct {
     }
 
     pub fn chatCompletion(self: *Client, provider: Provider, question: []const u8) !std.json.Parsed(ResponseModel) {
+        var messages = [_]ModelMessage{
+            .{ .role = .user, .content = question },
+        };
+        return self.chatCompletionWithMessages(provider, &messages);
+    }
+
+    pub fn chatCompletionWithMessages(self: *Client, provider: Provider, messages: []ModelMessage) !std.json.Parsed(ResponseModel) {
+        var model = RequestModel{
+            .model = provider.model,
+            .messages = messages,
+        };
+        return self.doChatCompletion(provider, &model);
+    }
+
+    fn doChatCompletion(self: *Client, provider: Provider, model: *RequestModel) !std.json.Parsed(ResponseModel) {
         const full_api_path = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ provider.base_url, provider.api_path_chat_completions });
         defer self.allocator.free(full_api_path);
 
@@ -76,9 +100,6 @@ pub const Client = struct {
             .content_type = .{ .override = "application/json" },
         } });
         defer request.deinit();
-
-        const model = try RequestModel.create(provider.model, question, self.allocator);
-        defer self.allocator.free(model.messages);
 
         var json_buffer = std.ArrayList(u8).init(self.allocator);
         defer json_buffer.deinit();
@@ -107,23 +128,10 @@ pub const Client = struct {
     }
 };
 
-const RequestModel = struct {
+pub const RequestModel = struct {
     model: []const u8,
     messages: []ModelMessage,
     stream: bool = false,
-
-    fn create(model: []const u8, content: []const u8, allocator: Allocator) !RequestModel {
-        var messages = try allocator.alloc(ModelMessage, 1);
-        messages[0] = ModelMessage{
-            .role = .user,
-            .content = content,
-        };
-
-        return RequestModel{
-            .model = model,
-            .messages = messages,
-        };
-    }
 };
 
 pub const ModelMessage = struct {
@@ -142,7 +150,7 @@ pub const ResponseModel = struct {
     usage: ModelUsage,
 };
 
-const ModelChoice = struct {
+pub const ModelChoice = struct {
     index: u8,
     message: ModelMessage,
 
@@ -150,9 +158,14 @@ const ModelChoice = struct {
     // finish_reason: []const u8,
 };
 
-const ModelUsage = struct {
+pub const ModelUsage = struct {
+    // 用户输入信息, 消耗的token数量
     prompt_tokens: u32,
+
+    // 大模型输出信息, 消耗的token数量
     completion_tokens: u32,
+
+    // 用户输入+大模型输出, 总的token数量
     total_tokens: u32,
 
     // prompt_tokens_details

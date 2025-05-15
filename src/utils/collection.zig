@@ -1,11 +1,11 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-pub fn findFirst(comptime T: type, list: std.ArrayList(T), predicate: fn (T) bool) error{NotFound}!T {
+pub fn findFirst(comptime T: type, list: *std.ArrayList(T), predicate: fn (T) bool) error{NotFound}!T {
     return findFirstOrNull(T, list, predicate) orelse error.NotFound;
 }
 
-pub fn findFirstOrNull(comptime T: type, list: std.ArrayList(T), predicate: fn (T) bool) ?T {
+pub fn findFirstOrNull(comptime T: type, list: *std.ArrayList(T), predicate: fn (T) bool) ?T {
     for (list.items) |it| {
         if (predicate(it)) {
             return it;
@@ -14,7 +14,7 @@ pub fn findFirstOrNull(comptime T: type, list: std.ArrayList(T), predicate: fn (
     return null;
 }
 
-pub fn any(comptime T: type, list: std.ArrayList(T), predicate: fn (T) bool) bool {
+pub fn any(comptime T: type, list: *std.ArrayList(T), predicate: fn (T) bool) bool {
     return findFirstOrNull(T, list, predicate) != null;
 }
 
@@ -24,10 +24,10 @@ fn TimestampedValue(comptime V: type) type {
     return struct {
         const Self = @This();
 
-        value: V,
+        value: *V,
         milli_ts: i64,
 
-        fn of(value: V) Self {
+        fn of(value: *V) Self {
             return .{
                 .value = value,
                 .milli_ts = std.time.milliTimestamp(),
@@ -41,12 +41,38 @@ pub fn BlockingStringMap() type {
 }
 
 pub const StringHandler = struct {
-    pub fn clone(allocator: Allocator, v: []const u8) Allocator.Error![]const u8 {
-        return allocator.dupe(u8, v);
+    pub fn alloc(allocator: Allocator, value: []const u8) Allocator.Error!*[]const u8 {
+        const ptr = try allocator.create([]const u8);
+        ptr.* = try allocator.dupe(u8, value);
+        return ptr;
     }
 
-    pub fn free(allocator: Allocator, v: []const u8) void {
-        allocator.free(v);
+    pub fn free(allocator: Allocator, value: *[]const u8) void {
+        allocator.free(value.*);
+        allocator.destroy(value);
+    }
+};
+
+pub const ArrayListStringHandler = struct {
+    pub fn alloc(allocator: Allocator, value: std.ArrayList([]const u8)) Allocator.Error!*std.ArrayList([]const u8) {
+        const ptr = try allocator.create(std.ArrayList([]const u8));
+        ptr.* = std.ArrayList([]const u8).init(allocator);
+
+        try ptr.ensureTotalCapacity(value.items.len);
+        for (value.items) |it| {
+            try ptr.append(try allocator.dupe(u8, it));
+        }
+
+        return ptr;
+    }
+
+    pub fn free(allocator: Allocator, value: *std.ArrayList([]const u8)) void {
+        for (value.items) |it| {
+            allocator.free(it);
+        }
+
+        value.deinit();
+        allocator.destroy(value);
     }
 };
 
@@ -55,18 +81,18 @@ pub const StringHandler = struct {
 // TODO sharded locking cannot protect concurrent resizing, extra cooperation is needed
 pub fn BlockingMap(comptime V: type, comptime Handler: type) type {
     comptime {
-        if (!@hasDecl(Handler, "clone") or !@hasDecl(Handler, "free")) {
-            @compileError("Handler must have clone and free methods");
+        if (!@hasDecl(Handler, "alloc") or !@hasDecl(Handler, "free")) {
+            @compileError("Handler must have alloc and free methods");
         }
 
-        const clone_type = @TypeOf(Handler.clone);
-        if (clone_type != fn (Allocator, V) Allocator.Error!V) {
-            @compileError("Handler.close must have signature `fn(Allocator, V) Allocator.Error!V`");
+        const alloc_type = @TypeOf(Handler.alloc);
+        if (alloc_type != fn (Allocator, V) Allocator.Error!*V) {
+            @compileError("Handler.alloc must have signature `fn(Allocator, V) Allocator.Error!*V`");
         }
 
         const free_type = @TypeOf(Handler.free);
-        if (free_type != fn (Allocator, V) void) {
-            @compileError("Handler.free must have signature `fn(Allocator, V) void`");
+        if (free_type != fn (Allocator, *V) void) {
+            @compileError("Handler.free must have signature `fn(Allocator, *V) void`");
         }
     }
 
@@ -109,7 +135,14 @@ pub fn BlockingMap(comptime V: type, comptime Handler: type) type {
             self.allocator.destroy(self.m);
         }
 
-        fn cleanup(self: *Self, exclude_key: ?[]const u8, age_limit_in_sec: ?i64) !void {
+        pub fn refesh(self: *Self, key: []const u8) void {
+            if (self.m.contains(key)) {
+                const v = self.m.getPtr(key).?;
+                v.milli_ts = std.time.milliTimestamp();
+            }
+        }
+
+        pub fn cleanup(self: *Self, exclude_key: ?[]const u8, age_limit_in_sec: ?i64) !void {
             // TODO this lock all mutex, possible to optimize?
             for (self.locks.items) |*l| l.lock();
             defer for (self.locks.items) |*l| l.unlock();
@@ -225,10 +258,10 @@ pub fn BlockingMap(comptime V: type, comptime Handler: type) type {
         }
 
         fn createTSV(self: *Self, unmanaged_value: V) Allocator.Error!TSV {
-            return TSV.of(try Handler.clone(self.allocator, unmanaged_value));
+            return TSV.of(try Handler.alloc(self.allocator, unmanaged_value));
         }
 
-        pub fn get(self: *Self, key: []const u8) ?V {
+        pub fn get(self: *Self, key: []const u8) ?*V {
             const result = self.guard(
                 "get",
                 key,
@@ -244,7 +277,7 @@ pub fn BlockingMap(comptime V: type, comptime Handler: type) type {
                 return null;
             };
 
-            self.cleanup(key, 30) catch |err| {
+            self.cleanup(key, 60) catch |err| {
                 std.debug.print("cleanup error: {}\n", .{err});
                 return null;
             };
@@ -268,7 +301,7 @@ pub fn BlockingMap(comptime V: type, comptime Handler: type) type {
 
         const GuardResult = union(enum) {
             put: void,
-            get: ?V,
+            get: ?*V,
         };
 
         const GuardCallback = fn (ctx: GuardContext) Allocator.Error!GuardResult;
@@ -343,7 +376,7 @@ test "BlockingStringMap basic put and get" {
 
     try map.put("k1", "v1");
 
-    try testing.expectEqualStrings("v1", map.get("k1").?);
+    try testing.expectEqualStrings("v1", map.get("k1").?.*);
     try testing.expectEqual(null, map.get("k2"));
 }
 
@@ -359,7 +392,7 @@ test "BlockingStringMap putWithValueFn" {
 
     try map.putWithValueFn("k", valueFn);
 
-    try testing.expectEqualStrings("v", map.get("k").?);
+    try testing.expectEqualStrings("v", map.get("k").?.*);
 }
 
 test "BlockingStringMap concurrent put and get" {
@@ -372,7 +405,7 @@ test "BlockingStringMap concurrent put and get" {
         }
         fn getWorker(m: *BlockingStringMap()) !void {
             std.Thread.sleep(std.time.ns_per_ms * 100); // Wait for put
-            try testing.expectEqualStrings("v", m.get("k").?);
+            try testing.expectEqualStrings("v", m.get("k").?.*);
         }
     };
 
@@ -404,7 +437,7 @@ test "BlockingStringMap cleanup age-based" {
 
     try testing.expectEqual(null, map.get("k1"));
     try testing.expectEqual(null, map.get("k2"));
-    try testing.expectEqualStrings("v3", map.get("k3").?);
+    try testing.expectEqualStrings("v3", map.get("k3").?.*);
 }
 
 test "BlockingStringMap memory management" {
@@ -440,49 +473,113 @@ test "BlockingStringMap manual lock and unlock" {
         try map.putRaw("k1", "v1");
     }
 
-    try testing.expectEqualStrings("v1", map.get("k1").?);
+    try testing.expectEqualStrings("v1", map.get("k1").?.*);
 }
 
-// const ArrayListStringHandler = struct {
-//     fn clone(allocator: Allocator, value: std.ArrayList([]const u8)) Allocator.Error!std.ArrayList([]const u8) {
-//         var new_list = std.ArrayList([]const u8).init(allocator);
-//         try new_list.ensureTotalCapacity(value.items.len);
-//         for (value.items) |item| {
-//             try new_list.append(try allocator.dupe(u8, item));
-//         }
-//         std.debug.print("addr of cloned list: {*}\n", .{&new_list});
-//         return new_list;
-//     }
+test "BlockingMap basic put and get with ArrayList([]const u8)" {
+    var map = try BlockingMap(std.ArrayList([]const u8), ArrayListStringHandler).init(testing.allocator);
+    defer map.deinit();
 
-//     fn free(allocator: Allocator, value: std.ArrayList([]const u8)) void {
-//         for (value.items) |item| {
-//             allocator.free(item);
-//         }
-//         value.deinit();
-//     }
-// };
+    var list = std.ArrayList([]const u8).init(testing.allocator);
+    defer list.deinit();
 
-// test "BlockingMap basic put and get with ArrayList([]const u8)" {
-//     var map = try BlockingMap(std.ArrayList([]const u8), ArrayListStringHandler).init(testing.allocator);
-//     defer map.deinit();
+    try list.append("item1");
+    try list.append("item2");
 
-//     var list = std.ArrayList([]const u8).init(testing.allocator);
-//     try list.append(try testing.allocator.dupe(u8, "item1"));
-//     try list.append(try testing.allocator.dupe(u8, "item2"));
+    try map.put("k1", list);
 
-//     try map.put("k1", list);
+    if (map.get("k1")) |value| {
+        try testing.expectEqual(2, value.items.len);
+        try testing.expectEqualStrings("item1", value.items[0]);
+        try testing.expectEqualStrings("item2", value.items[1]);
+    } else {
+        try testing.expect(false);
+    }
 
-//     if (map.get("k1")) |value| {
-//         std.debug.print("{*}\n", .{&value});
+    try testing.expectEqual(null, map.get("k2"));
+}
 
-//         try testing.expectEqual(2, value.items.len);
-//         try testing.expectEqualStrings("item1", value.items[0]);
-//         try testing.expectEqualStrings("item2", value.items[1]);
-//     } else {
-//         try testing.expect(false);
-//     }
+const ModelMessage = struct {
+    role: ModelMessageRole,
+    content: []const u8,
+};
 
-//     try testing.expectEqual(null, map.get("k2"));
+const ModelMessageRole = enum {
+    user,
+    assistant,
+};
 
-//     ArrayListStringHandler.free(testing.allocator, list);
-// }
+const ArrayListMessageHandler = struct {
+    fn alloc(allocator: Allocator, value: std.ArrayList(ModelMessage)) Allocator.Error!*std.ArrayList(ModelMessage) {
+        const ptr = try allocator.create(std.ArrayList(ModelMessage));
+        ptr.* = std.ArrayList(ModelMessage).init(allocator);
+
+        try ptr.ensureTotalCapacity(value.items.len);
+        for (value.items) |it| {
+            try ptr.append(.{
+                .role = it.role,
+                .content = try allocator.dupe(u8, it.content),
+            });
+        }
+
+        return ptr;
+    }
+
+    fn free(allocator: Allocator, value: *std.ArrayList(ModelMessage)) void {
+        for (value.items) |it| {
+            allocator.free(it.content);
+        }
+
+        value.deinit();
+        allocator.destroy(value);
+    }
+};
+
+test "BlockingMap basic put and get with ArrayList(ModelMessage)" {
+    var map = try BlockingMap(std.ArrayList(ModelMessage), ArrayListMessageHandler).init(testing.allocator);
+    defer map.deinit();
+
+    var list = std.ArrayList(ModelMessage).init(testing.allocator);
+    defer list.deinit();
+
+    try list.append(.{ .role = .user, .content = "question" });
+    try list.append(.{ .role = .assistant, .content = "answer" });
+
+    try map.put("k1", list);
+
+    // Verify initial state
+    if (map.get("k1")) |v| {
+        try testing.expectEqual(2, v.items.len);
+
+        try testing.expectEqual(ModelMessageRole.user, v.items[0].role);
+        try testing.expectEqualStrings("question", v.items[0].content);
+
+        try testing.expectEqual(ModelMessageRole.assistant, v.items[1].role);
+        try testing.expectEqualStrings("answer", v.items[1].content);
+    } else {
+        try testing.expect(false);
+    }
+
+    // Update the list in place
+    if (map.get("k1")) |v| {
+        try v.append(.{ .role = .user, .content = try map.allocator.dupe(u8, "hello") });
+    }
+
+    // Verify updated state
+    if (map.get("k1")) |v| {
+        try testing.expectEqual(3, v.items.len);
+
+        try testing.expectEqual(ModelMessageRole.user, v.items[0].role);
+        try testing.expectEqualStrings("question", v.items[0].content);
+
+        try testing.expectEqual(ModelMessageRole.assistant, v.items[1].role);
+        try testing.expectEqualStrings("answer", v.items[1].content);
+
+        try testing.expectEqual(ModelMessageRole.user, v.items[2].role);
+        try testing.expectEqualStrings("hello", v.items[2].content);
+    } else {
+        try testing.expect(false);
+    }
+
+    try testing.expectEqual(null, map.get("k2"));
+}
