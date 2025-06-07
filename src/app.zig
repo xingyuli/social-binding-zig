@@ -10,6 +10,7 @@ config: *Config,
 sqlite: *Sqlite,
 
 llm_client: *llm.Client,
+llm_client_v2: *llm.ClientV2,
 llm_session_cache: *LlmSessionCache,
 
 const log = std.log.scoped(.app);

@@ -26,6 +26,12 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addImport("xml", xml.module("xml"));
 
+    const uuid = b.dependency("uuid", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    exe.root_module.addImport("uuid", uuid.module("uuid"));
+
     exe.linkSystemLibrary("sqlite3");
     exe.linkLibC();
 
