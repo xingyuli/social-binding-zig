@@ -66,7 +66,9 @@ pub fn exec(self: Self, arena: Allocator, sql: []const u8) SqliteError!*ResultSe
 
     log.debug("Query executed successfully: {s}", .{sql});
 
-    for (result_set.items) |it| {
+    for (result_set.items, 0..) |it, i| {
+        log.debug("==================== row {d} ====================", .{i});
+
         var iter = it.iterator();
         while (iter.next()) |kv| {
             log.debug("{s}: {?s}", .{ kv.key_ptr.*, kv.value_ptr.* });

@@ -43,22 +43,6 @@ fn chatStream(app: *App, req: *httpz.Request, resp: *httpz.Response) !void {
 
     const conversation = try buildConversation(app, resp.arena, &req_body);
 
-    // opiton 1. direct processing: works, but stuck with one final shot
-
-    // // ChatGPT-Web consumes this:
-    // resp.content_type = .BINARY;
-
-    // var context = StreamContext{ .resp = resp };
-    // try app.llm_client_v2.chatStream(
-    //     llm.Provider.AliQwenTurbo,
-    //     &messages,
-    //     &context,
-    //     true,
-    //     onStreamMessage,
-    // );
-
-    // option 2. built-in SSE sync: works
-
     const stream = try resp.startEventStreamSync();
     var context = ChatStreamContext{
         .app = app,
@@ -76,33 +60,7 @@ fn chatStream(app: *App, req: *httpz.Request, resp: *httpz.Response) !void {
         &context,
         onStreamMessageForSSE,
     );
-    stream.close();
 }
-
-// option 1
-
-// const StreamContext = struct {
-//     resp: *httpz.Response,
-//     is_first: bool = true,
-// };
-
-// fn onStreamMessage(context: anytype, msg: *llm.ChatMessage) void {
-//     const resp = context.resp;
-
-//     var buf = std.ArrayList(u8).init(resp.arena);
-//     defer buf.deinit();
-//     std.json.stringify(msg, .{}, buf.writer()) catch unreachable;
-
-//     if (!context.is_first) {
-//         resp.writer().writeByte('\n') catch unreachable;
-//     }
-
-//     _ = resp.writer().write(buf.items) catch unreachable;
-
-//     context.is_first = false;
-// }
-
-// option 2
 
 fn buildConversation(app: *App, arena: std.mem.Allocator, payload: *ChatRequest) !Conversation {
     var l = std.ArrayList(llm.ModelMessage).init(arena);
@@ -113,27 +71,25 @@ fn buildConversation(app: *App, arena: std.mem.Allocator, payload: *ChatRequest)
 
     if (payload.options) |options| {
         if (options.parentMessageId) |parent_msg_id| {
-            const optional_p_msg = db.chat.findById(
-                .{ .sqlite = app.sqlite, .arena = arena },
-                parent_msg_id,
-            );
-            if (optional_p_msg) |p_msg| {
+            const ctx = db.QueryContext{ .sqlite = app.sqlite, .arena = arena };
+            if (db.chat.findById(ctx, parent_msg_id)) |p_msg| {
                 conversation_id = p_msg.conversation_id;
 
-                const hist_msgs = db.chat.findAllByConversationId(
-                    .{ .sqlite = app.sqlite, .arena = arena },
-                    p_msg.conversation_id,
-                );
+                db.chat.markMessageCycleAsDeleted(ctx, parent_msg_id);
+
+                const hist_msgs = db.chat.findAllByConversationId(ctx, p_msg.conversation_id);
                 for (hist_msgs.items) |it| {
                     try l.append(.{
                         .role = utils.enums.fromStringOrNull(llm.ModelMessageRole, it.role).?,
                         .content = it.content,
                     });
                 }
-            }
+            } else unreachable;
         } else {
             conversation_id = try arena.dupe(u8, &uuid.urn.serialize(uuid.v4.new()));
         }
+    } else {
+        conversation_id = try arena.dupe(u8, &uuid.urn.serialize(uuid.v4.new()));
     }
 
     try l.append(.{ .role = .user, .content = payload.prompt });
@@ -167,11 +123,8 @@ fn onStreamMessageForSSE(context: anytype, msg: *llm.ChatMessage, is_last: bool)
     defer buf.deinit();
     std.json.stringify(msg, .{}, buf.writer()) catch unreachable;
 
-    var content = buf.items;
-    if (!context.is_first) {
-        content = std.fmt.allocPrint(context.arena, "\n{s}", .{buf.items}) catch unreachable;
-    }
-    context.stream.writeAll(content) catch unreachable;
+    context.stream.writeAll(buf.items) catch unreachable;
+    context.stream.writeAll("\n\n") catch unreachable;
 
     if (is_last) {
         const app: *App = context.app;
@@ -192,9 +145,10 @@ fn onStreamMessageForSSE(context: anytype, msg: *llm.ChatMessage, is_last: bool)
             .parent_message_id = db_prompt_msg.id,
         };
 
+        const ctx = db.QueryContext{ .sqlite = app.sqlite, .arena = context.arena };
         // TODO feat: batch insert ?
-        db.chat.saveMessage(.{ .sqlite = app.sqlite, .arena = context.arena }, &db_prompt_msg) catch unreachable;
-        db.chat.saveMessage(.{ .sqlite = app.sqlite, .arena = context.arena }, &db_answer_msg) catch unreachable;
+        db.chat.saveMessage(ctx, &db_prompt_msg) catch unreachable;
+        db.chat.saveMessage(ctx, &db_answer_msg) catch unreachable;
     }
 
     context.is_first = false;

@@ -34,22 +34,14 @@ pub fn saveMessage(ctx: QueryContext, msg: *ChatMessage) !void {
 }
 
 pub fn findById(ctx: QueryContext, id: []const u8) ?ChatMessage {
-    const sql = std.fmt.allocPrint(
-        ctx.arena,
-        "SELECT * FROM chat_message WHERE id = '{s}'",
-        .{id},
-    ) catch unreachable;
-
-    const result_set = ctx.sqlite.exec(ctx.arena, sql) catch unreachable;
-
-    return if (result_set.items.len > 0) toModel(&result_set.items[0]) else null;
+    return findOneByParam(ctx, "id", id) catch unreachable;
 }
 
 pub fn findAllByConversationId(ctx: QueryContext, conversation_id: []const u8) std.ArrayList(ChatMessage) {
     const sql = std.fmt.allocPrint(
         ctx.arena,
         // `user` prompt then `assistant` answer
-        "SELECT * FROM chat_message WHERE conversation_id = '{s}' ORDER BY created_at, role DESC",
+        "SELECT * FROM chat_message WHERE is_deleted = 0 AND conversation_id = '{s}' ORDER BY created_at, role DESC",
         .{conversation_id},
     ) catch unreachable;
 
@@ -62,6 +54,45 @@ pub fn findAllByConversationId(ctx: QueryContext, conversation_id: []const u8) s
     }
 
     return l;
+}
+
+pub fn markMessageCycleAsDeleted(ctx: QueryContext, parent_message_id: []const u8) void {
+    var pmid = parent_message_id;
+    var possible: ?ChatMessage = null;
+
+    while (true) {
+        possible = findOneByParam(ctx, "parent_message_id", pmid) catch unreachable;
+        if (possible) |found| {
+            pmid = found.id;
+            deleteById(ctx, found.id);
+        } else break;
+    }
+}
+
+fn findOneByParam(ctx: QueryContext, column: []const u8, value: []const u8) !?ChatMessage {
+    const sql = std.fmt.allocPrint(
+        ctx.arena,
+        "SELECT * FROM chat_message WHERE is_deleted = 0 AND {s} = '{s}'",
+        .{ column, value },
+    ) catch unreachable;
+
+    const result_set = ctx.sqlite.exec(ctx.arena, sql) catch unreachable;
+
+    return switch (result_set.items.len) {
+        0 => null,
+        1 => toModel(&result_set.items[0]),
+        else => error.TooManyRows,
+    };
+}
+
+fn deleteById(ctx: QueryContext, id: []const u8) void {
+    const sql = std.fmt.allocPrint(
+        ctx.arena,
+        "UPDATE chat_message SET is_deleted = 1 WHERE id = '{s}'",
+        .{id},
+    ) catch unreachable;
+
+    _ = ctx.sqlite.exec(ctx.arena, sql) catch unreachable;
 }
 
 fn toModel(r: *Sqlite.ResultRow) ChatMessage {
