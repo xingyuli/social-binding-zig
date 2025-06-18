@@ -53,8 +53,9 @@ fn chatStream(app: *App, req: *httpz.Request, resp: *httpz.Response) !void {
         .conversation_id = conversation.id,
         .parent_message_id = parent_message_id,
     };
+    // TODO possible to specify bailian model name via request
     try app.llm_client_v2.chatStream(
-        llm.Provider.AliQwenTurbo,
+        llm.Provider.AliQwenPlus,
         conversation.messages.items,
         true,
         &context,
@@ -115,6 +116,8 @@ const ChatStreamContext = struct {
 };
 
 fn onStreamMessageForSSE(context: anytype, msg: *llm.ChatMessage, is_last: bool) void {
+    const stream: std.net.Stream = context.stream;
+
     const prompt_msg: *const llm.ModelMessage = context.prompt_msg;
     const conversation_id = context.conversation_id;
     const parent_message_id: ?[]const u8 = context.parent_message_id;
@@ -123,8 +126,15 @@ fn onStreamMessageForSSE(context: anytype, msg: *llm.ChatMessage, is_last: bool)
     defer buf.deinit();
     std.json.stringify(msg, .{}, buf.writer()) catch unreachable;
 
-    context.stream.writeAll(buf.items) catch unreachable;
-    context.stream.writeAll("\n\n") catch unreachable;
+    writeContent(stream, buf.items) catch |err| switch (err) {
+        error.BrokenPipe => {
+            log.info("Connection is closed by remote peer", .{});
+        },
+        error.WouldBlock => {
+            // simply ignore
+        },
+        else => unreachable,
+    };
 
     if (is_last) {
         const app: *App = context.app;
@@ -152,6 +162,11 @@ fn onStreamMessageForSSE(context: anytype, msg: *llm.ChatMessage, is_last: bool)
     }
 
     context.is_first = false;
+}
+
+fn writeContent(stream: std.net.Stream, content: []u8) std.net.Stream.WriteError!void {
+    try stream.writeAll(content);
+    try stream.writeAll("\n\n");
 }
 
 // *********************

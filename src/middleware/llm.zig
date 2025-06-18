@@ -322,7 +322,7 @@ pub const ClientV2 = struct {
             if (std.mem.startsWith(u8, line, "data: ")) {
                 const data = line[6..];
                 if (std.mem.eql(u8, data, "[DONE]")) {
-                    log.debug("Stream competed with [DONE]", .{});
+                    log.debug("Stream completed with [DONE]", .{});
                     on_message(context, msg, true);
                     return;
                 }

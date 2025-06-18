@@ -4,6 +4,8 @@
 .zig-cache/
 zig-out/
 
+ignore/
+
 data/
 
 config.json
