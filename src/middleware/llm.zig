@@ -48,6 +48,7 @@ pub const Provider = struct {
     };
 };
 
+// TODO remove Client once ClientV2 has been running for a long period
 pub const Client = struct {
     api_key: []const u8,
     allocator: Allocator,
@@ -185,13 +186,11 @@ pub const ModelMessageRole = enum {
 pub const ChatStreamCallback = fn (context: anytype, *ChatMessage, is_last: bool) void;
 
 pub const ClientV2 = struct {
-    api_key: []const u8,
     allocator: Allocator,
     client: std.http.Client,
 
-    pub fn init(api_key: []const u8, allocator: Allocator) ClientV2 {
+    pub fn init(allocator: Allocator) ClientV2 {
         return .{
-            .api_key = api_key,
             .allocator = allocator,
             .client = .{ .allocator = allocator },
         };
@@ -201,9 +200,58 @@ pub const ClientV2 = struct {
         self.client.deinit();
     }
 
+    // ----- one-shot -----
+
+    pub fn chatCompletion(
+        self: *ClientV2,
+        provider: Provider,
+        api_key: []const u8,
+        question: []const u8,
+    ) !std.json.Parsed(ResponseModel) {
+        var messages = [_]ModelMessage{
+            .{ .role = .user, .content = question },
+        };
+        return self.chatCompletionWithMessages(provider, api_key, &messages);
+    }
+
+    pub fn chatCompletionWithMessages(
+        self: *ClientV2,
+        provider: Provider,
+        api_key: []const u8,
+        messages: []ModelMessage,
+    ) !std.json.Parsed(ResponseModel) {
+        var model = RequestModel{
+            .model = provider.model,
+            .messages = messages,
+        };
+        return self.doChatCompletion(provider, api_key, &model);
+    }
+
+    fn doChatCompletion(
+        self: *ClientV2,
+        provider: Provider,
+        api_key: []const u8,
+        model: *RequestModel,
+    ) !std.json.Parsed(ResponseModel) {
+        var cc = ChatCompletion.init(self.allocator, &self.client);
+        defer cc.deinit();
+
+        try cc.send(provider, api_key, model);
+
+        const resp_text = try cc.request.?.reader().readAllAlloc(self.allocator, 1024 * 8);
+        // defer self.allocator.free(resp_text);
+
+        log.debug("Response body: {s}", .{resp_text});
+
+        return try std.json.parseFromSlice(ResponseModel, self.allocator, resp_text, .{ .ignore_unknown_fields = true });
+    }
+
+    // ----- stream -----
+
     pub fn chatStream(
         self: *ClientV2,
         provider: Provider,
+        api_key: []const u8,
         messages: []ModelMessage,
         enable_search: ?bool,
         context: anytype,
@@ -215,58 +263,21 @@ pub const ClientV2 = struct {
             .stream = true,
             .enable_search = enable_search,
         };
-        try self.doChatStream(provider, &model, context, on_message);
+        try self.doChatStream(provider, api_key, &model, context, on_message);
     }
 
     fn doChatStream(
         self: *ClientV2,
         provider: Provider,
+        api_key: []const u8,
         model: *RequestModel,
         context: anytype,
         on_message: ChatStreamCallback,
     ) !void {
-        const full_api_path = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}{s}",
-            .{ provider.base_url, provider.api_path_chat_completions },
-        );
-        defer self.allocator.free(full_api_path);
+        var cc = ChatCompletion.init(self.allocator, &self.client);
+        defer cc.deinit();
 
-        const uri = std.Uri.parse(full_api_path) catch unreachable;
-
-        const bearer = try std.fmt.allocPrint(self.allocator, "Bearer {s}", .{self.api_key});
-        defer self.allocator.free(bearer);
-
-        var header_buf: [1024]u8 = undefined;
-
-        var request = try self.client.open(.POST, uri, .{
-            .server_header_buffer = &header_buf,
-            .headers = .{
-                .authorization = .{ .override = bearer },
-                .content_type = .{ .override = "application/json" },
-            },
-        });
-        defer request.deinit();
-
-        var json_buffer = std.ArrayList(u8).init(self.allocator);
-        defer json_buffer.deinit();
-
-        try std.json.stringify(model, .{ .emit_null_optional_fields = false }, json_buffer.writer());
-        const body = json_buffer.items;
-
-        log.debug("Request body: {s}", .{body});
-
-        request.transfer_encoding = .{ .content_length = body.len };
-
-        try request.send();
-
-        try request.writeAll(body);
-
-        try request.finish();
-
-        try request.wait();
-
-        const reader = request.reader();
+        try cc.send(provider, api_key, model);
 
         var stream_buf: [1024 * 4]u8 = undefined;
         var fbs = std.io.fixedBufferStream(&stream_buf);
@@ -285,7 +296,7 @@ pub const ClientV2 = struct {
             fbs.reset();
 
             // Read a chunk of the response
-            const bytes_read = try reader.read(fbs.buffer[fbs.pos..]);
+            const bytes_read = try cc.request.?.reader().read(fbs.buffer[fbs.pos..]);
             if (bytes_read == 0) {
                 // End of stream
                 break;
@@ -351,6 +362,69 @@ pub const ClientV2 = struct {
             }
         }
     }
+
+    // ----- common -----
+
+    const ChatCompletion = struct {
+        allocator: Allocator,
+        client: *std.http.Client,
+
+        request: ?*std.http.Client.Request = null,
+
+        fn init(allocator: Allocator, client: *std.http.Client) @This() {
+            return .{
+                .allocator = allocator,
+                .client = client,
+            };
+        }
+
+        fn send(self: *@This(), provider: Provider, api_key: []const u8, model: *RequestModel) !void {
+            const full_api_path = try std.fmt.allocPrint(
+                self.allocator,
+                "{s}{s}",
+                .{ provider.base_url, provider.api_path_chat_completions },
+            );
+            defer self.allocator.free(full_api_path);
+
+            const uri = std.Uri.parse(full_api_path) catch unreachable;
+
+            const bearer = try std.fmt.allocPrint(self.allocator, "Bearer {s}", .{api_key});
+            defer self.allocator.free(bearer);
+
+            var header_buf: [1024]u8 = undefined;
+
+            var request = try self.client.open(.POST, uri, .{
+                .server_header_buffer = &header_buf,
+                .headers = .{
+                    .authorization = .{ .override = bearer },
+                    .content_type = .{ .override = "application/json" },
+                },
+            });
+
+            const body = try std.json.stringifyAlloc(self.allocator, model, .{ .emit_null_optional_fields = false });
+            defer self.allocator.free(body);
+
+            log.debug("Request body: {s}", .{body});
+
+            request.transfer_encoding = .{ .content_length = body.len };
+
+            try request.send();
+
+            try request.writeAll(body);
+
+            try request.finish();
+
+            try request.wait();
+
+            self.request = &request;
+        }
+
+        fn deinit(self: *@This()) void {
+            if (self.request) |req| {
+                req.deinit();
+            }
+        }
+    };
 };
 
 pub const ChatMessage = struct {

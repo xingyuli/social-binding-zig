@@ -9,7 +9,6 @@ const utils = @import("utils/utils.zig");
 config: *Config,
 sqlite: *Sqlite,
 
-llm_client: *llm.Client,
 llm_client_v2: *llm.ClientV2,
 llm_session_cache: *LlmSessionCache,
 
@@ -19,8 +18,15 @@ const Self = @This();
 
 pub const Config = struct {
     db_file: []const u8,
-    llm_api_key: []const u8,
+    llm_api_keys: LlmApiKeyConfig,
     wx: WxConfig,
+};
+const LlmApiKeyConfig = struct {
+    deep_seek: ?[]const u8 = null,
+    mini_max: ?[]const u8 = null,
+    ali_qwen_plus: ?[]const u8 = null,
+    ali_qwen_turbo: ?[]const u8 = null,
+    spark_lite: ?[]const u8 = null,
 };
 const WxConfig = struct {
     token: []const u8,

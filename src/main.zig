@@ -21,23 +21,18 @@ pub fn main() !void {
     var sqlite = try Sqlite.init(app_config.value.db_file);
     defer sqlite.deinit();
 
-    var llm_client = try llm.Client.init(app_config.value.llm_api_key, allocator);
-    defer llm_client.deinit();
-
     var llm_session_cache = try App.LlmSessionCache.init(allocator);
     defer llm_session_cache.deinit();
 
-    var llm_client_v2 = llm.ClientV2.init(app_config.value.llm_api_key, allocator);
-    defer llm_client_v2.deinit();
+    var llm_client = llm.ClientV2.init(allocator);
+    defer llm_client.deinit();
 
     var app = App{
         .config = &app_config.value,
         .sqlite = &sqlite,
 
-        .llm_client = &llm_client,
+        .llm_client_v2 = &llm_client,
         .llm_session_cache = &llm_session_cache,
-
-        .llm_client_v2 = &llm_client_v2,
     };
 
     var server = try httpz.Server(*App).init(allocator, .{ .port = 5882 }, &app);

@@ -178,7 +178,11 @@ fn sendChat(
 
     try messages.append(.{ .role = .user, .content = content });
 
-    const model = try app.llm_client.chatCompletionWithMessages(llm.Provider.SparkLite, messages.items);
+    const model = try app.llm_client_v2.chatCompletionWithMessages(
+        llm.Provider.SparkLite,
+        app.config.llm_api_keys.spark_lite.?,
+        messages.items,
+    );
 
     const answer = model.value.choices[0].message.content;
 

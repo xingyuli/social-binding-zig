@@ -56,6 +56,7 @@ fn chatStream(app: *App, req: *httpz.Request, resp: *httpz.Response) !void {
     // TODO possible to specify bailian model name via request
     try app.llm_client_v2.chatStream(
         llm.Provider.AliQwenPlus,
+        app.config.llm_api_keys.ali_qwen_plus.?,
         conversation.messages.items,
         true,
         &context,
