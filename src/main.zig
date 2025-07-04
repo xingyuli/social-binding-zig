@@ -1,11 +1,42 @@
 const std = @import("std");
 const httpz = @import("httpz");
+const dt = @import("datetime");
 
 const App = @import("app.zig");
 const routes = @import("routes/routes.zig");
 
 const Sqlite = @import("corner_stone/Sqlite.zig");
 const llm = @import("middleware/llm.zig");
+
+pub const std_options = std.Options{
+    .log_level = .debug,
+    .logFn = logFn,
+};
+
+pub fn logFn(
+    comptime message_level: std.log.Level,
+    comptime scope: @Type(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    var buf: [32]u8 = undefined;
+    const now = dt.datetime.Datetime.now().shiftTimezone(dt.timezones.Asia.Shanghai);
+    const now_str = now.formatISO8601Buf(&buf, true) catch return;
+
+    const level_txt = comptime message_level.asText();
+    const prefix2 = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
+    const stderr = std.io.getStdErr().writer();
+    var bw = std.io.bufferedWriter(stderr);
+    const writer = bw.writer();
+
+    std.debug.lockStdErr();
+    defer std.debug.unlockStdErr();
+    nosuspend {
+        writer.print("{s} ", .{now_str}) catch return;
+        writer.print(level_txt ++ prefix2 ++ format ++ "\n", args) catch return;
+        bw.flush() catch return;
+    }
+}
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};

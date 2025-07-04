@@ -32,6 +32,12 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addImport("uuid", uuid.module("uuid"));
 
+    const datetime = b.dependency("datetime", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    exe.root_module.addImport("datetime", datetime.module("datetime"));
+
     exe.linkSystemLibrary("sqlite3");
     exe.linkLibC();
 
